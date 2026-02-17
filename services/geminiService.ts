@@ -108,13 +108,14 @@ export const analyzeScreenshot = async (base64Image: string): Promise<string> =>
 
 /**
  * Step 3: Generate Post Content
- * Now accepts 'detectedProducts' context
+ * Now accepts 'detectedProducts' and optional 'refinementInstruction'
  */
 export const generatePostContent = async (
   inputTopic: string,
   platform: Platform,
   tone: Tone,
-  detectedProducts: string = ""
+  detectedProducts: string = "",
+  refinementInstruction: string = ""
 ): Promise<GeneratedPost> => {
   
   const systemInstruction = `
@@ -128,19 +129,28 @@ export const generatePostContent = async (
     3. **NO MARKDOWN**: Do not use bold (**text**) or italics inside the content body, except for hashtags.
   `;
 
-  // Construct a prompt that incorporates the visual findings
-  const prompt = `
+  // Construct a prompt that incorporates the visual findings AND refinement
+  let prompt = `
       Context: User wants a post about "${inputTopic}". 
       
       We searched Eslite's website and found these products in the screenshot: 
       "${detectedProducts}"
       
       Tone: ${tone}.
-      
-      Task: Write a short, engaging social media post. 
+  `;
+
+  if (refinementInstruction) {
+    prompt += `
+      \nIMPORTANT REFINEMENT INSTRUCTION: The user wants to adjust the previous draft. 
+      Please follow this specific instruction: "${refinementInstruction}".
+    `;
+  }
+
+  prompt += `
+      \nTask: Write a short, engaging social media post. 
       If the found products are relevant to the topic, SPECIFICALLY MENTION 1 or 2 of them to recommend to the reader.
       If no specific products were found, stick to the general lifestyle topic.
-    `;
+  `;
 
   try {
     const response = await ai.models.generateContent({

@@ -3,7 +3,7 @@ import { Platform, Tone, SavedPost } from './types';
 import PlatformSelector from './components/PlatformSelector';
 import PostPreview from './components/PostPreview';
 import { extractSearchKeyword, searchEslitePage, analyzeScreenshot, generatePostContent, generatePostImage, generateImagePromptFromContent } from './services/geminiService';
-import { Search, PenTool, Loader2, Save, Trash2, History, FileText, RefreshCw, ExternalLink, Image as ImageIcon, Globe, Zap } from 'lucide-react';
+import { Search, PenTool, Loader2, Save, Trash2, History, FileText, RefreshCw, ExternalLink, Image as ImageIcon, Globe, Zap, MessageSquarePlus, Sparkles } from 'lucide-react';
 
 const App: React.FC = () => {
   const [userInput, setUserInput] = useState('');
@@ -11,7 +11,8 @@ const App: React.FC = () => {
   
   const [selectedPlatform, setSelectedPlatform] = useState<Platform>(Platform.Instagram);
   const [selectedTone, setSelectedTone] = useState<Tone>(Tone.Literary);
-  const [enableSearch, setEnableSearch] = useState(true); // Toggle for search step
+  const [enableSearch, setEnableSearch] = useState(true); // Toggle for search mode
+  const [shouldRetakeScreenshot, setShouldRetakeScreenshot] = useState(true); // Toggle for re-taking screenshot inside search mode
   
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
@@ -23,7 +24,11 @@ const App: React.FC = () => {
   // Track 2: Content Result
   const [generatedText, setGeneratedText] = useState('');
   const [hashtags, setHashtags] = useState<string[]>([]);
-  const [suggestedImagePrompt, setSuggestedImagePrompt] = useState('');
+  
+  // Refinement Inputs
+  const [refinementText, setRefinementText] = useState(''); // Text refinement
+  const [suggestedImagePrompt, setSuggestedImagePrompt] = useState(''); // Image prompt editing
+  
   const [generatedImageUrl, setGeneratedImageUrl] = useState('');
 
   const [savedPosts, setSavedPosts] = useState<SavedPost[]>([]);
@@ -51,7 +56,7 @@ const App: React.FC = () => {
       generatedImageUrl,
       platform: selectedPlatform,
       tone: selectedTone,
-      product: null, // No specific product attached in this simplified version
+      product: null, 
       timestamp: Date.now()
     };
     
@@ -73,30 +78,37 @@ const App: React.FC = () => {
     setGeneratedImageUrl(post.generatedImageUrl || '');
     setSelectedPlatform(post.platform);
     setSelectedTone(post.tone);
+    setRefinementText('');
     
     // Smooth scroll to top
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Workflow: 
-  // Conditional: Search & Analyze (if enableSearch is true)
-  // Always: Generate Text & Image
+  // Main Generation Workflow
   const handleGenerate = async () => {
     if (!userInput.trim()) return;
     
     setIsGenerating(true);
-    setSearchScreenshotUrl('');
+    // Clear outputs only if we are doing a full regeneration
     setGeneratedText('');
+    setRefinementText('');
+    
+    // Only clear screenshot if we are re-taking it
+    if (shouldRetakeScreenshot) {
+      setSearchScreenshotUrl('');
+      setDetectedProducts('');
+      setSearchKeyword('');
+    }
+    
     setGeneratedImageUrl('');
-    setDetectedProducts('');
-    setSearchKeyword(''); 
     
     try {
-      let currentProducts = "";
+      let currentProducts = detectedProducts; // Use existing detected products by default
 
-      if (enableSearch) {
-        // --- Full Workflow with Search ---
-        
+      // Decide whether to run Search/Screenshot logic
+      const runSearch = enableSearch && (shouldRetakeScreenshot || !searchScreenshotUrl);
+
+      if (runSearch) {
         // Step 1: Search Screenshot
         setStatusMessage('1/4 正在搜尋誠品網頁並擷取畫面 (約需 10 秒)...');
         const keyword = await extractSearchKeyword(userInput);
@@ -111,10 +123,10 @@ const App: React.FC = () => {
         const products = await analyzeScreenshot(screenshot);
         currentProducts = products;
         setDetectedProducts(products);
-      } else {
-        // --- Fast Workflow (Skip Search) ---
-        // Just use user input as the context
+      } else if (!enableSearch) {
         setStatusMessage('1/2 跳過搜尋，正在根據輸入主題構思貼文...');
+      } else {
+        setStatusMessage('保留目前截圖，正在重新撰寫文案...');
       }
 
       // Step 3: Generate Text
@@ -124,7 +136,7 @@ const App: React.FC = () => {
         userInput, 
         selectedPlatform, 
         selectedTone,
-        currentProducts // Pass detected products (empty if search disabled)
+        currentProducts
       );
       setGeneratedText(post.content);
       setHashtags(post.hashtags);
@@ -151,24 +163,47 @@ const App: React.FC = () => {
     }
   };
 
+  // Refine Text Only
   const handleRegenerateTextOnly = async () => {
     if (!generatedText) return;
     setIsGenerating(true);
-    setStatusMessage('重新撰寫中...');
+    setStatusMessage('依照新指示重新撰寫中...');
     
-    // Uses the previously detected products if available
-    const post = await generatePostContent(
-      userInput,
-      selectedPlatform,
-      selectedTone,
-      detectedProducts
-    );
+    try {
+      const post = await generatePostContent(
+        userInput,
+        selectedPlatform,
+        selectedTone,
+        detectedProducts,
+        refinementText // Pass the refinement text
+      );
+      
+      setGeneratedText(post.content);
+      setHashtags(post.hashtags);
+      // We do NOT regenerate the image here to keep it independent, unless user explicitly asks
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsGenerating(false);
+      setStatusMessage('');
+    }
+  };
+
+  // Refine Image Only
+  const handleRegenerateImageOnly = async () => {
+    if (!suggestedImagePrompt) return;
+    setIsGenerating(true);
+    setStatusMessage('依照關鍵字重新繪圖中...');
     
-    setGeneratedText(post.content);
-    setHashtags(post.hashtags);
-    setSuggestedImagePrompt(post.suggestedImagePrompt || '');
-    setIsGenerating(false);
-    setStatusMessage('');
+    try {
+      const imgUrl = await generatePostImage(suggestedImagePrompt);
+      setGeneratedImageUrl(imgUrl);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsGenerating(false);
+      setStatusMessage('');
+    }
   };
 
   return (
@@ -210,35 +245,46 @@ const App: React.FC = () => {
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
               </div>
 
-              {/* Search Toggle Switch */}
-              <div 
-                className={`mt-4 p-3 rounded-lg border flex items-center justify-between cursor-pointer transition-colors select-none ${enableSearch ? 'bg-[#354E41]/5 border-[#354E41]/20' : 'bg-gray-50 border-gray-200'}`}
-                onClick={() => setEnableSearch(!enableSearch)}
-              >
-                <div className="flex items-center gap-3">
-                  {enableSearch ? (
-                    <div className="p-1.5 bg-[#354E41] rounded-full text-white">
-                      <Globe className="w-4 h-4" />
+              {/* Mode Toggles */}
+              <div className="mt-4 flex flex-col gap-2">
+                {/* Search Toggle */}
+                <div 
+                  className={`p-3 rounded-lg border flex items-center justify-between cursor-pointer transition-colors select-none ${enableSearch ? 'bg-[#354E41]/5 border-[#354E41]/20' : 'bg-gray-50 border-gray-200'}`}
+                  onClick={() => setEnableSearch(!enableSearch)}
+                >
+                  <div className="flex items-center gap-3">
+                    {enableSearch ? (
+                      <div className="p-1.5 bg-[#354E41] rounded-full text-white">
+                        <Globe className="w-4 h-4" />
+                      </div>
+                    ) : (
+                      <div className="p-1.5 bg-orange-100 rounded-full text-orange-600">
+                        <Zap className="w-4 h-4" />
+                      </div>
+                    )}
+                    <div className="flex flex-col">
+                      <span className={`text-sm font-bold ${enableSearch ? 'text-[#354E41]' : 'text-gray-600'}`}>
+                        {enableSearch ? '啟用誠品官網搜尋' : '快速模式 (不搜尋)'}
+                      </span>
                     </div>
-                  ) : (
-                    <div className="p-1.5 bg-orange-100 rounded-full text-orange-600">
-                      <Zap className="w-4 h-4" />
-                    </div>
-                  )}
-                  <div className="flex flex-col">
-                    <span className={`text-sm font-bold ${enableSearch ? 'text-[#354E41]' : 'text-gray-600'}`}>
-                      {enableSearch ? '啟用誠品官網搜尋' : '快速模式 (不搜尋)'}
-                    </span>
-                    <span className="text-xs text-gray-400">
-                      {enableSearch ? '自動搜尋商品並分析截圖 (約需 10 秒)' : '直接依照輸入主題撰寫文案 (較快速)'}
-                    </span>
+                  </div>
+                  <div className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${enableSearch ? 'bg-[#354E41]' : 'bg-gray-300'}`}>
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${enableSearch ? 'translate-x-6' : 'translate-x-1'}`} />
                   </div>
                 </div>
-                
-                {/* Toggle Switch Visual */}
-                <div className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${enableSearch ? 'bg-[#354E41]' : 'bg-gray-300'}`}>
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${enableSearch ? 'translate-x-6' : 'translate-x-1'}`} />
-                </div>
+
+                {/* Retake Screenshot Toggle (Only if Search is Enabled) */}
+                {enableSearch && (
+                  <div 
+                    className={`p-2 rounded-lg border flex items-center gap-3 cursor-pointer transition-colors select-none ml-4 ${shouldRetakeScreenshot ? 'bg-white border-[#354E41]/30' : 'bg-gray-50 border-gray-200 opacity-80'}`}
+                    onClick={() => setShouldRetakeScreenshot(!shouldRetakeScreenshot)}
+                  >
+                     <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${shouldRetakeScreenshot ? 'bg-[#354E41] border-[#354E41]' : 'bg-white border-gray-300'}`}>
+                        {shouldRetakeScreenshot && <Sparkles className="w-3 h-3 text-white" />}
+                     </div>
+                     <span className="text-sm text-gray-600">每次產生時，重新截取網頁畫面</span>
+                  </div>
+                )}
               </div>
 
               {/* Progress Indicator */}
@@ -299,41 +345,85 @@ const App: React.FC = () => {
               )}
             </button>
             
-            {/* Editor Area */}
+            {/* -------------------- Editors Area -------------------- */}
+            
             {generatedText && (
-               <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 animate-slide-up">
-                 <div className="flex justify-between items-center mb-3">
-                    <label className="block text-sm font-bold text-gray-700 uppercase tracking-wider">
-                      文案編輯器
-                    </label>
-                    <div className="flex gap-2 items-center">
-                        <button 
-                          onClick={handleSave}
-                          className="text-xs flex items-center gap-1 text-gray-600 hover:text-[#354E41] hover:bg-gray-100 px-2 py-1 rounded transition-colors"
-                          title="儲存草稿"
-                        >
-                          <Save className="w-3 h-3" /> 儲存
-                        </button>
-                        <div className="w-px h-3 bg-gray-300"></div>
-                        <button 
+               <div className="space-y-4 animate-slide-up">
+                 
+                 {/* Text Editor */}
+                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                   <div className="flex justify-between items-center mb-3">
+                      <label className="block text-sm font-bold text-gray-700 uppercase tracking-wider">
+                        文案編輯器
+                      </label>
+                      <button 
+                        onClick={handleSave}
+                        className="text-xs flex items-center gap-1 text-gray-600 hover:text-[#354E41] hover:bg-gray-100 px-2 py-1 rounded transition-colors"
+                        title="儲存草稿"
+                      >
+                        <Save className="w-3 h-3" /> 儲存
+                      </button>
+                   </div>
+                   <textarea
+                      value={generatedText}
+                      onChange={(e) => setGeneratedText(e.target.value)}
+                      className="w-full h-48 p-3 rounded-lg border border-gray-200 bg-white text-gray-900 focus:border-[#354E41] focus:ring-1 focus:ring-[#354E41] outline-none text-sm resize-none leading-relaxed"
+                   />
+                   <div className="mt-3 flex flex-wrap gap-2 mb-4">
+                      {hashtags.map((tag, idx) => (
+                        <span key={idx} className="text-xs bg-[#F5F5F0] text-[#354E41] px-2 py-1 rounded-full border border-[#E0DED5]">
+                          {tag}
+                        </span>
+                      ))}
+                   </div>
+                   
+                   {/* Text Refinement Input */}
+                   <div className="pt-4 border-t border-gray-100">
+                     <label className="text-xs font-bold text-gray-500 mb-2 flex items-center gap-1">
+                        <MessageSquarePlus className="w-3 h-3" /> 修改指令 (AI Refinement)
+                     </label>
+                     <div className="flex gap-2">
+                       <input 
+                          type="text" 
+                          value={refinementText}
+                          onChange={(e) => setRefinementText(e.target.value)}
+                          placeholder="例如：語氣再活潑一點、強調商品折扣、縮短長度..."
+                          className="flex-1 text-sm px-3 py-2 rounded-lg border border-gray-200 focus:border-[#354E41] outline-none"
+                          onKeyDown={(e) => e.key === 'Enter' && handleRegenerateTextOnly()}
+                       />
+                       <button 
                           onClick={handleRegenerateTextOnly}
-                          className="text-xs flex items-center gap-1 text-[#354E41] hover:underline px-2 py-1"
-                        >
-                          <RefreshCw className="w-3 h-3" /> 重新產生
-                        </button>
-                    </div>
+                          disabled={isGenerating}
+                          className="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors flex items-center gap-1"
+                       >
+                         <RefreshCw className={`w-3 h-3 ${isGenerating ? 'animate-spin' : ''}`} /> 
+                         修改文案
+                       </button>
+                     </div>
+                   </div>
                  </div>
-                 <textarea
-                    value={generatedText}
-                    onChange={(e) => setGeneratedText(e.target.value)}
-                    className="w-full h-48 p-3 rounded-lg border border-gray-200 bg-white text-gray-900 focus:border-[#354E41] focus:ring-1 focus:ring-[#354E41] outline-none text-sm resize-none leading-relaxed"
-                 />
-                 <div className="mt-3 flex flex-wrap gap-2">
-                    {hashtags.map((tag, idx) => (
-                      <span key={idx} className="text-xs bg-[#F5F5F0] text-[#354E41] px-2 py-1 rounded-full border border-[#E0DED5]">
-                        {tag}
-                      </span>
-                    ))}
+
+                 {/* Image Prompt Editor */}
+                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                   <label className="block text-sm font-bold text-gray-700 uppercase tracking-wider mb-3 flex items-center gap-2">
+                      <ImageIcon className="w-4 h-4" /> 圖片生成設定
+                   </label>
+                   <p className="text-xs text-gray-400 mb-2">編輯下方的英文提示詞 (Prompt) 來調整圖片風格或內容。</p>
+                   <textarea
+                      value={suggestedImagePrompt}
+                      onChange={(e) => setSuggestedImagePrompt(e.target.value)}
+                      className="w-full h-24 p-3 rounded-lg border border-gray-200 bg-gray-50 text-gray-600 focus:border-[#354E41] focus:bg-white outline-none text-xs resize-none font-mono leading-relaxed"
+                   />
+                   <div className="mt-3 flex justify-end">
+                      <button 
+                          onClick={handleRegenerateImageOnly}
+                          disabled={isGenerating}
+                          className="bg-[#354E41] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#2c4036] transition-colors flex items-center gap-2 shadow-sm"
+                       >
+                         <RefreshCw className={`w-3 h-3 ${isGenerating ? 'animate-spin' : ''}`} /> 
+                         重新產生圖片
+                       </button>
+                   </div>
                  </div>
                </div>
             )}
