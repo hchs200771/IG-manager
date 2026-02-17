@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Platform, Tone, SavedPost } from './types';
 import PlatformSelector from './components/PlatformSelector';
 import PostPreview from './components/PostPreview';
-import { extractSearchKeyword, searchEslitePage, generatePostContent, generatePostImage, generateImagePromptFromContent } from './services/geminiService';
-import { Search, PenTool, Loader2, Save, Trash2, History, FileText, RefreshCw, ExternalLink, Image as ImageIcon } from 'lucide-react';
+import { extractSearchKeyword, searchEslitePage, analyzeScreenshot, generatePostContent, generatePostImage, generateImagePromptFromContent } from './services/geminiService';
+import { Search, PenTool, Loader2, Save, Trash2, History, FileText, RefreshCw, ExternalLink, Image as ImageIcon, Globe, Zap } from 'lucide-react';
 
 const App: React.FC = () => {
   const [userInput, setUserInput] = useState('');
@@ -11,12 +11,14 @@ const App: React.FC = () => {
   
   const [selectedPlatform, setSelectedPlatform] = useState<Platform>(Platform.Instagram);
   const [selectedTone, setSelectedTone] = useState<Tone>(Tone.Literary);
+  const [enableSearch, setEnableSearch] = useState(true); // Toggle for search step
   
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   
   // Track 1: Visual Result (Full Screenshot)
   const [searchScreenshotUrl, setSearchScreenshotUrl] = useState('');
+  const [detectedProducts, setDetectedProducts] = useState('');
   
   // Track 2: Content Result
   const [generatedText, setGeneratedText] = useState('');
@@ -76,9 +78,9 @@ const App: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Parallel Workflow: 
-  // Track 1: Search Eslite (Keyword -> APIFlash Screenshot)
-  // Track 2: Content Generation (Topic -> Text -> Image)
+  // Workflow: 
+  // Conditional: Search & Analyze (if enableSearch is true)
+  // Always: Generate Text & Image
   const handleGenerate = async () => {
     if (!userInput.trim()) return;
     
@@ -86,52 +88,67 @@ const App: React.FC = () => {
     setSearchScreenshotUrl('');
     setGeneratedText('');
     setGeneratedImageUrl('');
-    setStatusMessage('AI 正在同步處理：擷取誠品網頁 (約需 6 秒) 與 撰寫社群貼文...');
+    setDetectedProducts('');
+    setSearchKeyword(''); 
     
-    // TRACK 1: Search Screenshot
-    const searchTask = (async () => {
-       try {
-         const keyword = await extractSearchKeyword(userInput);
-         setSearchKeyword(keyword);
-         const screenshot = await searchEslitePage(keyword);
-         setSearchScreenshotUrl(screenshot);
-       } catch (e) {
-         console.error("Search track failed", e);
-       }
-    })();
+    try {
+      let currentProducts = "";
 
-    // TRACK 2: Generate Content & Image
-    const contentTask = (async () => {
-       try {
-         // 2a. Text (Topic based)
-         const post = await generatePostContent(
-            userInput, 
-            selectedPlatform, 
-            selectedTone
-         );
-         setGeneratedText(post.content);
-         setHashtags(post.hashtags);
-         setSuggestedImagePrompt(post.suggestedImagePrompt || '');
+      if (enableSearch) {
+        // --- Full Workflow with Search ---
+        
+        // Step 1: Search Screenshot
+        setStatusMessage('1/4 正在搜尋誠品網頁並擷取畫面 (約需 10 秒)...');
+        const keyword = await extractSearchKeyword(userInput);
+        setSearchKeyword(keyword);
+        
+        const screenshot = await searchEslitePage(keyword);
+        if (!screenshot) throw new Error("Screenshot failed");
+        setSearchScreenshotUrl(screenshot);
 
-         // 2b. Image (Based on generated text)
-         if (post.content) {
-            const refinedPrompt = await generateImagePromptFromContent(post.content);
-            setSuggestedImagePrompt(refinedPrompt);
-            if (refinedPrompt) {
-               const imgUrl = await generatePostImage(refinedPrompt);
-               setGeneratedImageUrl(imgUrl);
-            }
+        // Step 2: Analyze Screenshot
+        setStatusMessage('2/4 正在分析頁面上的商品資訊...');
+        const products = await analyzeScreenshot(screenshot);
+        currentProducts = products;
+        setDetectedProducts(products);
+      } else {
+        // --- Fast Workflow (Skip Search) ---
+        // Just use user input as the context
+        setStatusMessage('1/2 跳過搜尋，正在根據輸入主題構思貼文...');
+      }
+
+      // Step 3: Generate Text
+      const stepMsg = enableSearch ? '3/4' : '1/2';
+      setStatusMessage(`${stepMsg} 正在撰寫社群貼文...`);
+      const post = await generatePostContent(
+        userInput, 
+        selectedPlatform, 
+        selectedTone,
+        currentProducts // Pass detected products (empty if search disabled)
+      );
+      setGeneratedText(post.content);
+      setHashtags(post.hashtags);
+      setSuggestedImagePrompt(post.suggestedImagePrompt || '');
+
+      // Step 4: Generate Image
+      if (post.content) {
+         const imgStepMsg = enableSearch ? '4/4' : '2/2';
+         setStatusMessage(`${imgStepMsg} 正在繪製貼文配圖...`);
+         const refinedPrompt = await generateImagePromptFromContent(post.content);
+         setSuggestedImagePrompt(refinedPrompt);
+         if (refinedPrompt) {
+            const imgUrl = await generatePostImage(refinedPrompt);
+            setGeneratedImageUrl(imgUrl);
          }
-       } catch (e) {
-         console.error("Content track failed", e);
-         setGeneratedText("抱歉，貼文產生發生錯誤。");
-       }
-    })();
+      }
 
-    await Promise.allSettled([searchTask, contentTask]);
-    
-    setIsGenerating(false);
-    setStatusMessage('');
+    } catch (e) {
+      console.error("Generation failed", e);
+      setGeneratedText("抱歉，流程執行中發生錯誤，請稍後再試。");
+    } finally {
+      setIsGenerating(false);
+      setStatusMessage('');
+    }
   };
 
   const handleRegenerateTextOnly = async () => {
@@ -139,10 +156,12 @@ const App: React.FC = () => {
     setIsGenerating(true);
     setStatusMessage('重新撰寫中...');
     
+    // Uses the previously detected products if available
     const post = await generatePostContent(
       userInput,
       selectedPlatform,
-      selectedTone
+      selectedTone,
+      detectedProducts
     );
     
     setGeneratedText(post.content);
@@ -175,7 +194,7 @@ const App: React.FC = () => {
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
               <label className="block text-sm font-bold text-gray-700 mb-3 uppercase tracking-wider flex justify-between">
                 <span>1. 輸入主題或關鍵字</span>
-                {searchKeyword && searchKeyword !== userInput && (
+                {searchKeyword && searchKeyword !== userInput && enableSearch && (
                    <span className="text-xs text-gray-400 font-normal normal-case">AI 搜尋關鍵字: {searchKeyword}</span>
                 )}
               </label>
@@ -190,6 +209,45 @@ const App: React.FC = () => {
                 />
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
               </div>
+
+              {/* Search Toggle Switch */}
+              <div 
+                className={`mt-4 p-3 rounded-lg border flex items-center justify-between cursor-pointer transition-colors select-none ${enableSearch ? 'bg-[#354E41]/5 border-[#354E41]/20' : 'bg-gray-50 border-gray-200'}`}
+                onClick={() => setEnableSearch(!enableSearch)}
+              >
+                <div className="flex items-center gap-3">
+                  {enableSearch ? (
+                    <div className="p-1.5 bg-[#354E41] rounded-full text-white">
+                      <Globe className="w-4 h-4" />
+                    </div>
+                  ) : (
+                    <div className="p-1.5 bg-orange-100 rounded-full text-orange-600">
+                      <Zap className="w-4 h-4" />
+                    </div>
+                  )}
+                  <div className="flex flex-col">
+                    <span className={`text-sm font-bold ${enableSearch ? 'text-[#354E41]' : 'text-gray-600'}`}>
+                      {enableSearch ? '啟用誠品官網搜尋' : '快速模式 (不搜尋)'}
+                    </span>
+                    <span className="text-xs text-gray-400">
+                      {enableSearch ? '自動搜尋商品並分析截圖 (約需 10 秒)' : '直接依照輸入主題撰寫文案 (較快速)'}
+                    </span>
+                  </div>
+                </div>
+                
+                {/* Toggle Switch Visual */}
+                <div className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${enableSearch ? 'bg-[#354E41]' : 'bg-gray-300'}`}>
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${enableSearch ? 'translate-x-6' : 'translate-x-1'}`} />
+                </div>
+              </div>
+
+              {/* Progress Indicator */}
+               {isGenerating && (
+                <div className="mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200 flex items-center gap-3 animate-fade-in">
+                   <Loader2 className="w-5 h-5 animate-spin text-[#354E41]" />
+                   <span className="text-sm text-gray-600 font-medium">{statusMessage}</span>
+                </div>
+              )}
             </div>
 
             {/* 2. Platform Selection */}
@@ -235,7 +293,7 @@ const App: React.FC = () => {
               `}
             >
               {isGenerating ? (
-                 <> <Loader2 className="w-5 h-5 animate-spin" /> {statusMessage || '處理中...'} </>
+                 <> <Loader2 className="w-5 h-5 animate-spin" /> 處理中... </>
               ) : (
                  <> <PenTool className="w-5 h-5" /> 產生貼文 </>
               )}
@@ -369,7 +427,8 @@ const App: React.FC = () => {
         </div>
 
         {/* Full Page Width Screenshot Section at the bottom */}
-        {(searchScreenshotUrl || isGenerating) && (
+        {/* Only show if enableSearch is true AND we have a screenshot or are generating one */}
+        {enableSearch && (searchScreenshotUrl || (isGenerating && !generatedText)) && (
           <div className="mt-12 pt-8 border-t border-gray-200 animate-slide-up">
               <div className="flex justify-between items-center mb-4">
                 <span className="text-lg font-bold text-gray-700 uppercase flex items-center gap-2">
@@ -398,8 +457,7 @@ const App: React.FC = () => {
                   ) : (
                     <div className="flex flex-col items-center justify-center h-[400px] text-gray-400 gap-3">
                        <Loader2 className="w-10 h-10 animate-spin text-[#354E41]" />
-                       <div className="text-sm font-medium">正在截取頁面畫面，請稍候 (約 6 秒)...</div>
-                       <div className="text-xs text-gray-300">為了完整呈現，我們延長了等待時間</div>
+                       <div className="text-sm font-medium">{statusMessage || '正在截取頁面畫面...'}</div>
                     </div>
                   )}
               </div>

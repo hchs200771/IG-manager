@@ -55,14 +55,10 @@ export const searchEslitePage = async (keyword: string): Promise<string> => {
     const esliteSearchUrl = `https://www.eslite.com/Search?keyword=${safeKeyword}`;
     
     // 2. Construct APIFlash URL
-    // We ADD &delay=6 (increased from 3) to ensure lazy-loaded images at the bottom appear.
-    // We ADD &fresh=true to prevent caching old blank results.
-    // We ADD &full_page=true as requested.
+    // Wait until page_loaded, delay 10s for lazy loading, fresh=true, full_page=true
     const encodedTargetUrl = encodeURIComponent(esliteSearchUrl);
     const apiFlashUrl = `https://api.apiflash.com/v1/urltoimage?access_key=451bf298d8ad46d6a087700a62ac34d5&wait_until=page_loaded&delay=10&fresh=true&full_page=true&format=jpeg&quality=80&url=${encodedTargetUrl}`;
     
-    // Fetch the image and convert to Base64 to display securely/consistently
-    // (Or we could just return the apiFlashUrl, but fetching it ensures we handle errors here)
     const base64Image = await urlToBase64(apiFlashUrl);
     
     return `data:image/jpeg;base64,${base64Image}`;
@@ -74,12 +70,51 @@ export const searchEslitePage = async (keyword: string): Promise<string> => {
 };
 
 /**
+ * Step 2.5: Analyze the Screenshot to find products
+ */
+export const analyzeScreenshot = async (base64Image: string): Promise<string> => {
+  if (!base64Image) return "";
+  
+  try {
+    // Strip header if present for Gemini API (though usually SDK handles it, detecting pure base64 is safer)
+    const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: cleanBase64
+            }
+          },
+          {
+            text: "Look at this Eslite bookstore search result page. List the titles of the top 3 to 5 books or products visible in the list. If no products are clearly visible, return 'No specific products found'."
+          }
+        ]
+      }
+    });
+    
+    const analysis = response.text?.trim() || "";
+    console.log("[Analysis Result]:", analysis);
+    return analysis;
+
+  } catch (e) {
+    console.error("Screenshot analysis failed", e);
+    return "";
+  }
+}
+
+/**
  * Step 3: Generate Post Content
+ * Now accepts 'detectedProducts' context
  */
 export const generatePostContent = async (
   inputTopic: string,
   platform: Platform,
-  tone: Tone
+  tone: Tone,
+  detectedProducts: string = ""
 ): Promise<GeneratedPost> => {
   
   const systemInstruction = `
@@ -93,10 +128,18 @@ export const generatePostContent = async (
     3. **NO MARKDOWN**: Do not use bold (**text**) or italics inside the content body, except for hashtags.
   `;
 
+  // Construct a prompt that incorporates the visual findings
   const prompt = `
-      Context: Lifestyle topic "${inputTopic}". 
+      Context: User wants a post about "${inputTopic}". 
+      
+      We searched Eslite's website and found these products in the screenshot: 
+      "${detectedProducts}"
+      
       Tone: ${tone}.
-      Task: Write a short, engaging social media post sharing thoughts on this topic (max 300 chars).
+      
+      Task: Write a short, engaging social media post. 
+      If the found products are relevant to the topic, SPECIFICALLY MENTION 1 or 2 of them to recommend to the reader.
+      If no specific products were found, stick to the general lifestyle topic.
     `;
 
   try {
