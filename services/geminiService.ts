@@ -4,23 +4,6 @@ import { Platform, Tone, GeneratedPost } from "../types";
 const apiKey = process.env.API_KEY || '';
 const ai = new GoogleGenAI({ apiKey });
 
-// Helper: Convert URL image to Base64 string for Gemini
-const urlToBase64 = async (url: string): Promise<string> => {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Screenshot fetch failed: ${response.status}`);
-  const blob = await response.blob();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      // Remove data:image/jpeg;base64, prefix
-      const base64String = (reader.result as string).replace(/^data:.+;base64,/, '');
-      resolve(base64String);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-};
-
 /**
  * Step 1: Extract a searchable product keyword
  */
@@ -42,69 +25,37 @@ export const extractSearchKeyword = async (userInput: string): Promise<string> =
 };
 
 /**
- * Step 2: Search Eslite via APIFlash Screenshot (Full Page)
- * Returns the Base64 string of the screenshot
+ * Step 2: Search Eslite via Backend API
+ * Returns a list of products
  */
-export const searchEslitePage = async (keyword: string): Promise<string> => {
-  console.log(`[Debug] Taking screenshot for: "${keyword}"`);
+export const searchEsliteProducts = async (keyword: string): Promise<any[]> => {
+  console.log(`[Debug] Searching for: "${keyword}"`);
   
   try {
-    // 1. Construct Eslite Search URL
-    const safeKeyword = encodeURIComponent(keyword.trim());
-    // Updated parameter from 'q' to 'keyword'
-    const esliteSearchUrl = `https://www.eslite.com/Search?keyword=${safeKeyword}`;
-    
-    // 2. Construct APIFlash URL
-    // Wait until page_loaded, delay 10s for lazy loading, fresh=true, full_page=true
-    const encodedTargetUrl = encodeURIComponent(esliteSearchUrl);
-    const apiFlashUrl = `https://api.apiflash.com/v1/urltoimage?access_key=451bf298d8ad46d6a087700a62ac34d5&wait_until=page_loaded&delay=10&fresh=true&full_page=true&format=jpeg&quality=80&url=${encodedTargetUrl}`;
-    
-    const base64Image = await urlToBase64(apiFlashUrl);
-    
-    return `data:image/jpeg;base64,${base64Image}`;
-
+    const response = await fetch(`/api/search?q=${encodeURIComponent(keyword)}`);
+    if (!response.ok) {
+      throw new Error(`Search API failed: ${response.status}`);
+    }
+    const data = await response.json();
+    return data.results || [];
   } catch (error) {
-    console.error("[Search] Screenshot failed:", error);
-    return "";
+    console.error("[Search] API failed:", error);
+    return [];
   }
 };
 
 /**
- * Step 2.5: Analyze the Screenshot to find products
+ * Format products for Gemini context
  */
-export const analyzeScreenshot = async (base64Image: string): Promise<string> => {
-  if (!base64Image) return "";
+export const formatProductsForGemini = (products: any[]): string => {
+  if (!products || products.length === 0) return "No specific products found";
   
-  try {
-    // Strip header if present for Gemini API (though usually SDK handles it, detecting pure base64 is safer)
-    const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
-
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-image",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: "image/jpeg",
-              data: cleanBase64
-            }
-          },
-          {
-            text: "Look at this Eslite bookstore search result page. List the titles of the top 3 to 5 books or products visible in the list. If no products are clearly visible, return 'No specific products found'."
-          }
-        ]
-      }
-    });
-    
-    const analysis = response.text?.trim() || "";
-    console.log("[Analysis Result]:", analysis);
-    return analysis;
-
-  } catch (e) {
-    console.error("Screenshot analysis failed", e);
-    return "";
-  }
-}
+  // Take top 3 products
+  const topProducts = products.slice(0, 3);
+  return topProducts.map((p, index) => {
+    return `${index + 1}. ${p.name} (Price: ${p.final_price})`;
+  }).join('\n');
+};
 
 /**
  * Step 3: Generate Post Content
@@ -133,7 +84,7 @@ export const generatePostContent = async (
   let prompt = `
       Context: User wants a post about "${inputTopic}". 
       
-      We searched Eslite's website and found these products in the screenshot: 
+      We searched Eslite's website. The following products were found: 
       "${detectedProducts}"
       
       Tone: ${tone}.
@@ -148,7 +99,8 @@ export const generatePostContent = async (
 
   prompt += `
       \nTask: Write a short, engaging social media post. 
-      If the found products are relevant to the topic, SPECIFICALLY MENTION 1 or 2 of them to recommend to the reader.
+      Because the listed products were found, SPECIFICALLY MENTION 1 to 3 of them to recommend to the reader.
+      Make the connection between the topic and these specific products.
       If no specific products were found, stick to the general lifestyle topic.
   `;
 
@@ -205,7 +157,9 @@ export const generateImagePromptFromContent = async (postContent: string): Promi
         
         Style Keywords: Professional photography, Kinfolk magazine style, 4k, soft natural lighting, depth of field, Canon 5D, lifestyle, elegant.
         Negative Constraints: NO cartoons, NO illustrations, NO drawing, NO text.
-        Output: English prompt only. Keep it under 50 words.
+        
+        Output: English prompt. 
+        Describe the scene visually in detail using English. Keep it under 50 words.
       `,
     });
     return response.text?.trim() || "";

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Platform, Tone, SavedPost } from './types';
 import PlatformSelector from './components/PlatformSelector';
 import PostPreview from './components/PostPreview';
-import { extractSearchKeyword, searchEslitePage, analyzeScreenshot, generatePostContent, generatePostImage, generateImagePromptFromContent } from './services/geminiService';
+import { extractSearchKeyword, searchEsliteProducts, formatProductsForGemini, generatePostContent, generatePostImage, generateImagePromptFromContent } from './services/geminiService';
 import { Search, PenTool, Loader2, Save, Trash2, History, FileText, RefreshCw, ExternalLink, Image as ImageIcon, Globe, Zap, MessageSquarePlus, Sparkles } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -17,8 +17,8 @@ const App: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   
-  // Track 1: Visual Result (Full Screenshot)
-  const [searchScreenshotUrl, setSearchScreenshotUrl] = useState('');
+  // Track 1: Search Results
+  const [searchResults, setSearchResults] = useState<any[]>([]);
   const [detectedProducts, setDetectedProducts] = useState('');
   
   // Track 2: Content Result
@@ -93,9 +93,9 @@ const App: React.FC = () => {
     setGeneratedText('');
     setRefinementText('');
     
-    // Only clear screenshot if we are re-taking it
+    // Only clear search results if we are re-taking it
     if (shouldRetakeScreenshot) {
-      setSearchScreenshotUrl('');
+      setSearchResults([]);
       setDetectedProducts('');
       setSearchKeyword('');
     }
@@ -105,28 +105,27 @@ const App: React.FC = () => {
     try {
       let currentProducts = detectedProducts; // Use existing detected products by default
 
-      // Decide whether to run Search/Screenshot logic
-      const runSearch = enableSearch && (shouldRetakeScreenshot || !searchScreenshotUrl);
+      // Decide whether to run Search logic
+      const runSearch = enableSearch && (shouldRetakeScreenshot || searchResults.length === 0);
 
       if (runSearch) {
-        // Step 1: Search Screenshot
-        setStatusMessage('1/4 正在搜尋誠品網頁並擷取畫面 (約需 10 秒)...');
+        // Step 1: Search API
+        setStatusMessage('1/4 正在搜尋誠品商品...');
         const keyword = await extractSearchKeyword(userInput);
         setSearchKeyword(keyword);
         
-        const screenshot = await searchEslitePage(keyword);
-        if (!screenshot) throw new Error("Screenshot failed");
-        setSearchScreenshotUrl(screenshot);
+        const productsList = await searchEsliteProducts(keyword);
+        setSearchResults(productsList);
 
-        // Step 2: Analyze Screenshot
-        setStatusMessage('2/4 正在分析頁面上的商品資訊...');
-        const products = await analyzeScreenshot(screenshot);
-        currentProducts = products;
-        setDetectedProducts(products);
+        // Step 2: Format Products
+        setStatusMessage('2/4 正在分析商品資訊...');
+        const productsStr = formatProductsForGemini(productsList);
+        currentProducts = productsStr;
+        setDetectedProducts(productsStr);
       } else if (!enableSearch) {
         setStatusMessage('1/2 跳過搜尋，正在根據輸入主題構思貼文...');
       } else {
-        setStatusMessage('保留目前截圖，正在重新撰寫文案...');
+        setStatusMessage('保留目前搜尋結果，正在重新撰寫文案...');
       }
 
       // Step 3: Generate Text
@@ -138,25 +137,36 @@ const App: React.FC = () => {
         selectedTone,
         currentProducts
       );
-      setGeneratedText(post.content);
-      setHashtags(post.hashtags);
-      setSuggestedImagePrompt(post.suggestedImagePrompt || '');
+      
+      let hasGeneratedText = false;
+      if (post && post.content) {
+        setGeneratedText(post.content);
+        setHashtags(post.hashtags);
+        setSuggestedImagePrompt(post.suggestedImagePrompt || '');
+        hasGeneratedText = true;
+      }
 
       // Step 4: Generate Image
-      if (post.content) {
+      if (hasGeneratedText) {
          const imgStepMsg = enableSearch ? '4/4' : '2/2';
          setStatusMessage(`${imgStepMsg} 正在繪製貼文配圖...`);
          const refinedPrompt = await generateImagePromptFromContent(post.content);
          setSuggestedImagePrompt(refinedPrompt);
          if (refinedPrompt) {
-            const imgUrl = await generatePostImage(refinedPrompt);
-            setGeneratedImageUrl(imgUrl);
+            try {
+              const imgUrl = await generatePostImage(refinedPrompt);
+              setGeneratedImageUrl(imgUrl);
+            } catch (imgErr) {
+              console.error("Image generation failed", imgErr);
+              setStatusMessage('圖片繪製失敗，但文案已產生完成。');
+            }
          }
       }
 
     } catch (e) {
       console.error("Generation failed", e);
-      setGeneratedText("抱歉，流程執行中發生錯誤，請稍後再試。");
+      // Only show error if we haven't successfully generated text
+      setGeneratedText(prev => prev ? prev : "抱歉，流程執行中發生錯誤，請稍後再試。");
     } finally {
       setIsGenerating(false);
       setStatusMessage('');
@@ -273,7 +283,7 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Retake Screenshot Toggle (Only if Search is Enabled) */}
+                {/* Retake Search Toggle (Only if Search is Enabled) */}
                 {enableSearch && (
                   <div 
                     className={`p-2 rounded-lg border flex items-center gap-3 cursor-pointer transition-colors select-none ml-4 ${shouldRetakeScreenshot ? 'bg-white border-[#354E41]/30' : 'bg-gray-50 border-gray-200 opacity-80'}`}
@@ -282,7 +292,7 @@ const App: React.FC = () => {
                      <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${shouldRetakeScreenshot ? 'bg-[#354E41] border-[#354E41]' : 'bg-white border-gray-300'}`}>
                         {shouldRetakeScreenshot && <Sparkles className="w-3 h-3 text-white" />}
                      </div>
-                     <span className="text-sm text-gray-600">每次產生時，重新截取網頁畫面</span>
+                     <span className="text-sm text-gray-600">每次產生時，重新搜尋商品</span>
                   </div>
                 )}
               </div>
@@ -388,7 +398,7 @@ const App: React.FC = () => {
                           value={refinementText}
                           onChange={(e) => setRefinementText(e.target.value)}
                           placeholder="例如：語氣再活潑一點、強調商品折扣、縮短長度..."
-                          className="flex-1 text-sm px-3 py-2 rounded-lg border border-gray-200 focus:border-[#354E41] outline-none"
+                          className="flex-1 text-sm px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 placeholder-gray-400 focus:border-[#354E41] outline-none"
                           onKeyDown={(e) => e.key === 'Enter' && handleRegenerateTextOnly()}
                        />
                        <button 
@@ -408,7 +418,7 @@ const App: React.FC = () => {
                    <label className="block text-sm font-bold text-gray-700 uppercase tracking-wider mb-3 flex items-center gap-2">
                       <ImageIcon className="w-4 h-4" /> 圖片生成設定
                    </label>
-                   <p className="text-xs text-gray-400 mb-2">編輯下方的英文提示詞 (Prompt) 來調整圖片風格或內容。</p>
+                   <p className="text-xs text-gray-400 mb-2">編輯下方的圖片提示詞 (Prompt) 來調整圖片風格或內容。</p>
                    <textarea
                       value={suggestedImagePrompt}
                       onChange={(e) => setSuggestedImagePrompt(e.target.value)}
@@ -516,14 +526,14 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Full Page Width Screenshot Section at the bottom */}
-        {/* Only show if enableSearch is true AND we have a screenshot or are generating one */}
-        {enableSearch && (searchScreenshotUrl || (isGenerating && !generatedText)) && (
+        {/* Search Results Section at the bottom */}
+        {/* Only show if enableSearch is true AND we have results or are generating */}
+        {enableSearch && (searchResults.length > 0 || (isGenerating && !generatedText)) && (
           <div className="mt-12 pt-8 border-t border-gray-200 animate-slide-up">
               <div className="flex justify-between items-center mb-4">
                 <span className="text-lg font-bold text-gray-700 uppercase flex items-center gap-2">
                   <ImageIcon className="w-5 h-5 text-[#354E41]" />
-                  誠品搜尋結果快照 {searchKeyword && <span className="text-sm font-normal text-gray-500">(關鍵字: {searchKeyword})</span>}
+                  誠品搜尋結果 {searchKeyword && <span className="text-sm font-normal text-gray-500">(關鍵字: {searchKeyword})</span>}
                 </span>
                 {searchKeyword && (
                   <a 
@@ -537,17 +547,29 @@ const App: React.FC = () => {
                 )}
               </div>
               
-              <div className="w-full bg-white rounded-2xl shadow-md border border-gray-200 overflow-hidden min-h-[300px] relative">
-                  {searchScreenshotUrl ? (
-                    <img 
-                      src={searchScreenshotUrl} 
-                      alt="Eslite Search Result Full Page" 
-                      className="w-full h-auto block"
-                    />
+              <div className="w-full bg-white rounded-2xl shadow-md border border-gray-200 overflow-hidden min-h-[300px] relative p-6">
+                  {searchResults.length > 0 ? (
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                      {searchResults.slice(0, 10).map((product, idx) => (
+                        <div key={idx} className="border border-gray-100 rounded-lg p-3 hover:shadow-md transition-shadow">
+                          <div className="aspect-square mb-3 overflow-hidden rounded bg-gray-50">
+                            {product.product_photo_url ? (
+                              <img src={product.product_photo_url} alt={product.name} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-gray-300">
+                                <ImageIcon className="w-8 h-8" />
+                              </div>
+                            )}
+                          </div>
+                          <h4 className="text-xs font-medium text-gray-800 line-clamp-2 mb-1" title={product.name}>{product.name}</h4>
+                          <p className="text-[#354E41] font-bold text-sm">${product.final_price}</p>
+                        </div>
+                      ))}
+                    </div>
                   ) : (
-                    <div className="flex flex-col items-center justify-center h-[400px] text-gray-400 gap-3">
+                    <div className="flex flex-col items-center justify-center h-[300px] text-gray-400 gap-3">
                        <Loader2 className="w-10 h-10 animate-spin text-[#354E41]" />
-                       <div className="text-sm font-medium">{statusMessage || '正在截取頁面畫面...'}</div>
+                       <div className="text-sm font-medium">{statusMessage || '正在搜尋商品...'}</div>
                     </div>
                   )}
               </div>
